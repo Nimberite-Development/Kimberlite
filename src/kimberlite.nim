@@ -3,7 +3,8 @@ import std/[
   strformat,
   strutils,
   options, # Self-explanatory
-  tables   # Used primarily for storing clients in a table so that they can be referenced easily.
+  tables,  # Used primarily for storing clients in a table so that they can be referenced easily.
+  json
 ]
 # Continuation Passing Style stuff
 import cps
@@ -15,6 +16,9 @@ import sys/sockets/addresses
 # MC-related networking
 import modernnet
 import modernnet/helpers
+# UUID
+import uuids
+
 # Kimberlite code
 import kimberlite/[
   packets # Contains packet definitions
@@ -35,9 +39,11 @@ type
   Client* = ref object
     ## Kimberlite client object
     conn*: AsyncConn[TCP]
+    buf*, internalBuf: seq[byte]
     protocol*: int32
     connected*, disableStatusResponse: bool
     state*: ConnectionState
+    uuid*: UUID
 
 
 # ? Adds a continuation to the queue
@@ -48,19 +54,33 @@ proc init*(S: typedesc[Server], address: IP4Endpoint | IP6Endpoint | IPEndpoint)
   ## Initialize the server object
   result = S(sock: listenTcpAsync(address))
 
+# ? Closes the client.
+proc close*(c: Client) = #{.cps: ServerCont.} =
+  ## Close the client connection
+  c.connected = false
+
+# ? Reads data from the socket into the buffer.
+proc readToBuf(c: Client): bool {.cps: ServerCont.} =
+  ## Reads data from the socket into the buffer. Reads 4kb at a time. Returns false on 0 bytes read.
+  result = true
+  let bytesRead = c.conn.read(cast[ptr UncheckedArray[byte]](addr c.internalBuf[0]), c.internalBuf.len)
+
+  if bytesRead <= 0:
+    c.close()
+    return false
+
+  c.buf.add c.internalBuf[0..<bytesRead]
+
 # ? Reads a raw packet from the socket.
 proc readPacket(c: Client): Option[RawPacket] {.cps: ServerCont.} =
   ## Reads the packet ID and buffer from a socket. Returns `RawPacket` on success.
-  var
-    b = seq[byte].new()
-    res = readRawPacket(b[])
+  var res = readRawPacket(c.buf)
 
   while not res.isOk:
-    # Make the buffer bigger so we can read more data
-    let offset = b[].len
-    b[].setLen(b[].len + res.err)
-    if c.conn.read(cast[ptr UncheckedArray[byte]](addr b[][offset]), res.err) <= 0: return none(RawPacket)
-    res = readRawPacket(b[])
+    if not c.readToBuf(): return none(RawPacket)
+    res = readRawPacket(c.buf)
+
+  for _ in 0..<res.ok.bytesRead: c.buf.delete(0)
 
   some(res.ok.packet)
 
@@ -77,12 +97,6 @@ template writePacket[P: ClientboundPacket](c: Client, packet: P): bool =
   buf.buf = b.buf & buf.buf
 
   c.conn.write(cast[ptr UncheckedArray[byte]](addr buf.buf[0]), buf.len) == buf.len
-
-# ? Closes the client.
-proc close*(c: Client) {.cps: ServerCont.} =
-  ## Close the client connection
-  c.conn.close()
-  c.connected = false
 
 # ? Util for printing a buffer as hex
 proc toHex(buf: Buffer): string {.cps: ServerCont.} =
@@ -128,7 +142,7 @@ ServerboundStatusRequest.handler(client, server, packet):
   # but it's probably unnecessary, to be honest.
   if client.disableStatusResponse: return
 
-  if not (client.writePacket ClientboundStatusResponse(response: buildServerListJson("1.21.1", client.protocol, 0, 0))):
+  if not (client.writePacket ClientboundStatusResponse(serverlist: buildServerListJson("1.21.1", client.protocol, 0, 0))):
     client.close()
 
   client.disableStatusResponse = true
@@ -143,9 +157,22 @@ ServerboundPingRequest.handler(client, server, packet):
 
   client.disableStatusResponse = true
 
+# ? Login start handler
+ServerboundLoginStart.handler(client, server, packet):
+  ## Handles the initial login packet.
+  let sbls = ServerboundLoginStart.read packet.buf
+  client.uuid = sbls.uuid
+
+  echo "Client with username `" & $sbls.username & "` and `" & $sbls.uuid & "` connected!"
+
+  discard client.writePacket(ClientboundDisconnectLogin(reason: %*{"text": "Unimplemented."}))
+  client.close()
+
 # ? Handles MC clients.
 proc handleClient(server: Server, client: Client) {.cps: ServerCont.} =
   mixin execute # Used to execute the packet handler
+
+  discard client.readToBuf()
 
   while client.connected:
     # If the packet fails to be read, close the client as we assume it has been disconnected.
@@ -153,30 +180,6 @@ proc handleClient(server: Server, client: Client) {.cps: ServerCont.} =
 
     # Execute the packet handler.
     handlePacket(client.state, packet.id, client, server, packet)
-    #[
-    if not client.playMode:
-      case packet.id
-      of 0x00:
-        if not client.handshook:
-          let sbh = ServerboundHandshake.read packet.buf
-          client.protocol = sbh.version.unwrap()
-          # TODO: Implement logic for protocol version-dependent behaviour
-          client.handshook = true
-        else:
-          let res = ClientboundStatusResponse(response: buildServerListJson("1.21.1", client.protocol, 0, 0))
-
-          if not (client.conn.writePacket res): client.close()
-
-      of 0x01:
-        let pingReq = ServerboundPingRequest.read packet.buf
-
-        if not (client.conn.writePacket ClientboundPingResponse(nonce: pingReq.nonce)): client.close()
-      else:
-        echo &"Unsupported packet! ID `0x{toHex(byte(packet.id))}`, Contents `{toHex(packet.buf)}`"
-        client.close()
-    else:
-      client.close()
-  ]#
 
 # ? Starts the server
 proc start(s: Server) {.cps: ServerCont.} =
@@ -188,7 +191,8 @@ proc start(s: Server) {.cps: ServerCont.} =
   while s.running:
     let (conn, _) = s.sock.accept()
 
-    s.spawn: whelp handleClient(s, Client(conn: conn, connected: true))
+    var c = Client(conn: conn, connected: true, internalBuf: newSeq[byte](1024 * 4))
+    s.spawn: whelp handleClient(s, c)
 
 # ? Runs the server dispatcher
 proc run*(s: Server) =

@@ -1,16 +1,26 @@
-import std/json # Used for serverlist JSON
+import std/[
+  macros,
+  json
+]
 
 import ./primitives
+
+template registerPacket(id: range[0..high(int32).int], state: ConnectionState) {.pragma.}
 
 type
   ClientboundPacket* = object of Packet
 
-  ClientboundStatusResponse* {.packetId(0x00).} = object of ClientboundPacket
-    response*: JsonNode
+  ClientboundStatusResponse* {.registerPacket(0x00, Status).} = object of ClientboundPacket
+    serverlist*: JsonNode
 
-  ClientboundPingResponse* {.packetId(0x01).} = object of ClientboundPacket
+  ClientboundPingResponse* {.registerPacket(0x01, Status).} = object of ClientboundPacket
     nonce*: int64
 
+  ClientboundDisconnectLogin* {.registerPacket(0x00, Login).} = object of ClientboundPacket
+    reason*: JsonNode
+
+proc id*[T: Packet](_: T | typedesc[T]): int32 = getCustomPragmaVal(T, registerPacket).id.int32
+proc state*[T: Packet](_: T | typedesc[T]): ConnectionState = getCustomPragmaVal(T, registerPacket).state
 
 proc writeImpl(buf: Buffer, val: CappedString) =
   ## Writes a string up to the given length to the buffer.

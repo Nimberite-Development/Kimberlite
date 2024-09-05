@@ -1,15 +1,16 @@
 # Stdlib
 import std/[
-  macros, # Use for `getCustomPragmaVal`
   tables, # Used to make a map of packets to their IDs.
   json    # Used for JSON objects, TODO: Use Jsony or Sunny instead.
 ]
 # MC-related networking
 import modernnet
 
-template packetId*(id: range[0..high(int32).int]) {.pragma.}
-
 type
+  # Client states
+  ConnectionState* = enum
+    InitialConnection, Status, Login, Configuration, Playing
+
   # Aliases
   SizedOrdinal* = (VarLen[int32 | int64] | SomeInteger) and not(int | uint)
 
@@ -21,8 +22,6 @@ type
   # Packet definitions
   Packet* = object of RootObj
 
-
-proc id*[T: Packet](_: T | typedesc[T]): int32 = getCustomPragmaVal(T, packetId)
 
 proc `$`*(s: VarLen): string = $s.R(s)
 proc `$`*(s: VarEnum): string = $s.E(s)

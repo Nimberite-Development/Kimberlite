@@ -3,13 +3,12 @@ import std/[
   macros
 ]
 
+import uuids
+
 import ./primitives
 
 type
   Empty*[T] = object
-
-  ConnectionState* = enum
-    InitialConnection, Status, Login, Configuration, Playing
 
 var ServerboundPacketHandler* {.compileTime.} = newStmtList()
 
@@ -29,8 +28,6 @@ macro registerPacket(id: static range[0..high(int32).int], state: static Connect
     error("Packet with state `" & $state & "` and ID " & $id & " already exists!", result[0])
 
   stateNode.add newStmtList(newLit(id), result[0][1])
-
-  echo ServerboundPacketHandler.treeRepr
 
 
 macro handlePacket*(state: ConnectionState, id: range[0..high(int32).int],
@@ -61,8 +58,6 @@ macro handlePacket*(state: ConnectionState, id: range[0..high(int32).int],
     `client`.close()
     echo "Unimplemented behaviour for state `" ,`state`, "` and ID ", `id`, "!"
   )
-  echo result.treeRepr
-  echo result.repr
 
 type
   ServerboundPacket* = object of Packet
@@ -85,6 +80,10 @@ type
   ServerboundPingRequest* {.registerPacket(0x01, Status).} = object of ServerboundPacket
     nonce*: int64
 
+  ServerboundLoginStart* {.registerPacket(0x00, Login).} = object of ServerboundPacket
+    username*: CappedString[16]
+    uuid*: UUID
+
 
 proc readImpl(buf: Buffer, T: typedesc[CappedString]): T =
   ## Reads a string up to the given length and writes it to the `field`.
@@ -103,6 +102,10 @@ proc readImpl(buf: Buffer, T: typedesc[VarEnum]): T =
 proc readImpl(buf: Buffer, T: typedesc[SizedOrdinal]): T =
   ## Reads a boolean or number type from the buffer and writes it to the `field`.
   buf.readNum[:T]()
+
+proc readImpl(buf: Buffer, T: typedesc[UUID]): T =
+  ## Reads a UUID from the buffer and writes it to the `field`.
+  buf.readUUID()
 
 
 proc read*[T: ServerboundPacket](_: typedesc[T], buf: Buffer): T =
